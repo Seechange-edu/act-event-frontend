@@ -34,27 +34,59 @@ jobs:
           cp ./env/${{ env.ACTIVE }}.env .env.production
           yarn build
 
+      - name: Login to AWS ECR
+        id: login-pf-aws-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+  
       - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
         run: |
-          echo ${{ secrets.TOKEN }} | docker login registry.digitalocean.com \
-          -u "${{ vars.DO_DOCR_LOGIN_EMAIL }}" --password-stdin
-          docker build --tag ${{ env.IMAGE }} --file Dockerfile-Self .
-          docker push ${{ env.IMAGE }}
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/prod:${{ github.event.release.tag_name }}"
+          docker build --tag ${IMAGE_URI} --file Dockerfile-Self .
+          docker push ${IMAGE_URI}
+          echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_ENV
+  
+      - name: Get ECR login token
+        id: ecr-login-token
+        run: |
+          ECR_TOKEN=$(aws ecr get-login-password --region ${{ vars.AWS_REGION }})
+          echo "token<<EOF" >> $GITHUB_OUTPUT
+          echo "$ECR_TOKEN" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+        run: |
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/${{ env.ACTIVE }}:${{ env.NAME }}"
+
+          docker build --tag ${IMAGE_URI} --file Dockerfile-Self .
+          docker push ${IMAGE_URI}
 
       - name: SSH and Run Docker image
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          ECR_TOKEN: ${{ steps.ecr-login-token.outputs.token }}
+          ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
         with:
           host: ${{ vars.REMOTE_HOST }}
           username: ${{ vars.REMOTE_USER }}
           key: ${{ secrets.REMOTE_SSH_KEY }}
+          envs: ECR_TOKEN,ECR_REGISTRY,ECR_REPOSITORY
           script: |
-            docker pull ${{ env.IMAGE }}
-            echo ${{ secrets.TOKEN }} | docker login registry.digitalocean.com \
-            -u "${{ vars.DO_DOCR_LOGIN_EMAIL }}" --password-stdin
+            # Login to AWS ECR using temporary token from GitHub Actions
+            echo ${ECR_TOKEN} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+            IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/${{ env.ACTIVE }}:${{ env.NAME }}"
+            docker pull ${IMAGE_URI}
             if [ "$(docker ps -a --format '{{.Names}}' | grep -c ${{ env.NAME }})" -gt 0 ]; then 
               docker rm -f ${{ env.NAME }}
             fi
-            docker run --name ${{ env.NAME }} -d -p ${{ env.OUT_PORT }}:${{ env.PORT }} --restart unless-stopped ${{ env.IMAGE }}
+            docker run --name ${{ env.NAME }} -d -p ${{ env.OUT_PORT }}:${{ env.PORT }} --restart unless-stopped ${IMAGE_URI}
             docker image prune --force
             docker container prune --force
 
