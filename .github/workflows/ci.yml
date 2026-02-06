@@ -42,6 +42,23 @@ jobs:
           cp ./env/${{ env.ACTIVE }}.env .env.production
           yarn build
 
+      - name: Normalize ECR repository name
+        id: normalize-ecr
+        run: |
+          # 将 dev-ipdc, dev-oxford 等映射到 dev
+          # 将 uat-* 映射到 uat
+          # 其他保持不变
+          ACTIVE_ENV="${{ env.ACTIVE }}"
+          if [[ "$ACTIVE_ENV" == dev-* ]]; then
+            ECR_NAME="dev"
+          elif [[ "$ACTIVE_ENV" == uat-* ]]; then
+            ECR_NAME="uat"
+          else
+            ECR_NAME="$ACTIVE_ENV"
+          fi
+          echo "ECR_NAME=${ECR_NAME}" >> $GITHUB_ENV
+          echo "Normalized ECR repository name: ${ECR_NAME} (from ${ACTIVE_ENV})"
+
       - name: Setup AWS ECR Details (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -59,7 +76,7 @@ jobs:
           ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
           IMAGE_TAG: ${{ env.IMAGE || 'latest' }}
         run: |
-          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/${{ env.ACTIVE }}:${IMAGE_TAG}"
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/${ECR_NAME}:${IMAGE_TAG}"
           docker build --tag ${IMAGE_URI} --file Dockerfile-Self .
           docker push ${IMAGE_URI}
           echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_ENV
@@ -78,12 +95,12 @@ jobs:
           host: ${{ vars.REMOTE_HOST }}
           username: ${{ vars.REMOTE_USER }}
           key: ${{ secrets.REMOTE_SSH_KEY }}
-          envs: ECR_REGISTRY,ECR_REPOSITORY,IMAGE_TAG,ECR_TOKEN
+          envs: ECR_REGISTRY,ECR_REPOSITORY,ECR_NAME,IMAGE_TAG,ECR_TOKEN
           script: |
             # Login to AWS ECR using temporary token from GitHub Actions
             echo ${ECR_TOKEN} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
             
-            IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/${{ env.ACTIVE }}:${IMAGE_TAG}"
+            IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/${ECR_NAME}:${IMAGE_TAG}"
             docker pull ${IMAGE_URI}
             if [ "$(docker ps -a --format '{{.Names}}' | grep -c ${{ env.PREV_NAME }})" -gt 0 ]; then 
               docker rm -f ${{ env.PREV_NAME }}
@@ -97,6 +114,7 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+          ECR_NAME: ${{ env.ECR_NAME }}
           IMAGE_TAG: ${{ env.IMAGE || 'latest' }}
           ECR_TOKEN: ${{ steps.ecr-login-token.outputs.token }}
 
