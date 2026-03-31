@@ -73,7 +73,7 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
         with:
-          host: ${{ vars.REMOTE_HOST }}
+          host: ${{ env.REMOTE_HOST }}
           username: ${{ vars.REMOTE_USER }}
           key: ${{ secrets.REMOTE_SSH_KEY }}
           envs: ECR_TOKEN,ECR_REGISTRY,ECR_REPOSITORY
@@ -90,72 +90,19 @@ jobs:
             docker image prune --force
             docker container prune --force
 
-  notify-teams-dev:
-    if: ${{ github.ref_name == 'dev' }}
+  notify-teams:
     needs: [ build ]
     runs-on: ubuntu-latest
     steps:
+      - name: get tag info
+        uses: Seechange-edu/Parse-Action-Tag@main
+        with:
+          githubToken: ${{ secrets.ACTION_TOKEN }}
+          type: parse
+
       - name: Send Teams Notification
         env:
-          WEBHOOK: ${{ vars.DEV_TEAMS_WEBHOOK_URL }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          curl -X POST -H "Content-Type: application/json" \
-          -d '{
-            "@type": "MessageCard",
-            "@context": "http://schema.org/extensions",
-            "themeColor": "${{ needs.build.result == 'success' && '00FF00' || 'FF0000' }}",
-            "summary": "${{ needs.build.result == 'success' && '🎉 Build succeeded!' || '❌ Build failed!' }}:${{ github.repository }}:${{ github.workflow }}",
-            "title": "${{ needs.build.result == 'success' && '🎉 Build succeeded!' || '❌ Build failed!' }}:${{ github.repository }}:${{ github.workflow }}",
-            "sections": [{
-              "facts": [
-                { "name": "Repository", "value": "${{ github.repository }}" },
-                { "name": "Triggered by", "value": "${{ github.event_name }}" },
-                { "name": "Commit Message", "value": "${{ github.event.head_commit.message }}" },
-                { "name": "Author", "value": "@${{ github.actor }}" },
-                { "name": "Result", "value": "${{ needs.build.result }}" }
-              ],
-              "text": "[View Workflow Run](${{ env.RUN_URL }})"
-            }]
-          }' \
-          "$WEBHOOK"
-  notify-teams-uat:
-    if: ${{ github.ref_name == 'uat' }}
-    needs: [ build ]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Send Teams Notification
-        env:
-          WEBHOOK: ${{ vars.UAT_TEAMS_WEBHOOK_URL }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          curl -X POST -H "Content-Type: application/json" \
-          -d '{
-            "@type": "MessageCard",
-            "@context": "http://schema.org/extensions",
-            "themeColor": "${{ needs.build.result == 'success' && '00FF00' || 'FF0000' }}",
-            "summary": "${{ needs.build.result == 'success' && '🎉 Build succeeded!' || '❌ Build failed!' }}:${{ github.repository }}:${{ github.workflow }}",
-            "title": "${{ needs.build.result == 'success' && '🎉 Build succeeded!' || '❌ Build failed!' }}:${{ github.repository }}:${{ github.workflow }}",
-            "sections": [{
-              "facts": [
-                { "name": "Repository", "value": "${{ github.repository }}" },
-                { "name": "Triggered by", "value": "${{ github.event_name }}" },
-                { "name": "Commit Message", "value": "${{ github.event.head_commit.message }}" },
-                { "name": "Author", "value": "@${{ github.actor }}" },
-                { "name": "Result", "value": "${{ needs.build.result }}" }
-              ],
-              "text": "[View Workflow Run](${{ env.RUN_URL }})"
-            }]
-          }' \
-          "$WEBHOOK"
-  notify-teams-dev-oxford:
-    if: ${{ github.ref_name == 'dev-oxford' }}
-    needs: [ build ]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Send Teams Notification
-        env:
-          WEBHOOK: ${{ vars.DEV_OXFORD_TEAMS_WEBHOOK_URL }}
+          WEBHOOK: ${{ env.TEAMS_WEBHOOK }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           curl -X POST -H "Content-Type: application/json" \
