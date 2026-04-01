@@ -74,7 +74,7 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
-          IMAGE_TAG: ${{ env.IMAGE || 'latest' }}
+          IMAGE_TAG: ${{ env.BRANCH }}
         run: |
           IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/${ECR_NAME}:${IMAGE_TAG}"
           docker build --tag ${IMAGE_URI} --file Dockerfile-Self .
@@ -115,7 +115,7 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
           ECR_NAME: ${{ env.ECR_NAME }}
-          IMAGE_TAG: ${{ env.IMAGE || 'latest' }}
+          IMAGE_TAG: ${{ env.BRANCH }}
           ECR_TOKEN: ${{ steps.ecr-login-token.outputs.token }}
 
   notify-teams:
