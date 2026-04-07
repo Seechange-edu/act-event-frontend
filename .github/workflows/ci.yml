@@ -39,25 +39,40 @@ jobs:
       - name: Build Yarn
         run: |
           yarn --frozen-lockfile
-          cp ./env/${{ env.ACTIVE }}.env .env.production
+          if [ -n "$ENV_FILE" ]; then
+            cp "./env/$ENV_FILE" .env.production
+          else
+            cp "./env/${ACTIVE}.env" .env.production
+          fi
           yarn build
+        env:
+          ACTIVE: ${{ env.ACTIVE }}
+          ENV_FILE: ${{ env.ENV_FILE }}
 
       - name: Normalize ECR repository name
         id: normalize-ecr
         run: |
-          # 将 dev-ipdc, dev-oxford 等映射到 dev
-          # 将 uat-* 映射到 uat
-          # 其他保持不变
+          # 根源：dev-aimcup 的 ACTIVE=dev-aimcup 能匹配 dev-* → ECR_NAME=dev；
+          # prod-aimcup 的 ACTIVE=aimcup-prod 不匹配 dev/uat，旧逻辑 else 会用 ACTIVE → 误推 .../aimcup-prod。
+          # Parse-Action-Tag 已单独 export PUSHREF（与 dev 对称：dev→dev、prod→prod），应用它决定 ECR 路径最稳。
+          IMAGE_SUB="${{ env.IMAGE_REPO_SUBPATH }}"
+          PUSH_REF="${{ env.PUSHREF }}"
           ACTIVE_ENV="${{ env.ACTIVE }}"
-          if [[ "$ACTIVE_ENV" == dev-* ]]; then
+          if [ -n "$IMAGE_SUB" ]; then
+            ECR_NAME="$IMAGE_SUB"
+          elif [[ "$PUSH_REF" == "dev" ]] || [[ "$PUSH_REF" == "uat" ]] || [[ "$PUSH_REF" == "prod" ]]; then
+            ECR_NAME="$PUSH_REF"
+          elif [[ "$ACTIVE_ENV" == dev-* ]]; then
             ECR_NAME="dev"
           elif [[ "$ACTIVE_ENV" == uat-* ]]; then
             ECR_NAME="uat"
+          elif [[ "$ACTIVE_ENV" == "prod" ]] || [[ "$ACTIVE_ENV" == "aimcup-prod" ]]; then
+            ECR_NAME="prod"
           else
             ECR_NAME="$ACTIVE_ENV"
           fi
           echo "ECR_NAME=${ECR_NAME}" >> $GITHUB_ENV
-          echo "Normalized ECR repository name: ${ECR_NAME} (from ${ACTIVE_ENV})"
+          echo "Normalized ECR repository name: ${ECR_NAME} (PUSHREF=${PUSH_REF}, ACTIVE=${ACTIVE_ENV}, IMAGE_REPO_SUBPATH=${IMAGE_SUB})"
 
       - name: Setup AWS ECR Details (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -74,12 +89,13 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
-          IMAGE_TAG: ${{ env.BRANCH }}
+          # Parse 有 IMAGE 用固定 tag（如 aimcup-prod）；否则用 BRANCH（发版 tag，与线上一致）
+          IMAGE_TAG: ${{ env.IMAGE || env.BRANCH || 'latest' }}
         run: |
           IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/${ECR_NAME}:${IMAGE_TAG}"
-          echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_ENV
           docker build --tag ${IMAGE_URI} --file Dockerfile-Self .
           docker push ${IMAGE_URI}
+          echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_ENV
 
       - name: Get ECR login token
         id: ecr-login-token
@@ -92,14 +108,16 @@ jobs:
       - name: SSH and Run Docker image
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ env.REMOTE_HOST }}
+          # Release body 里 REMOTE_HOST（Parse）优先，否则用仓库 Variables
+          host: ${{ env.REMOTE_HOST || vars.REMOTE_HOST }}
           username: ${{ vars.REMOTE_USER }}
           key: ${{ secrets.REMOTE_SSH_KEY }}
-          envs: ECR_REGISTRY,ECR_TOKEN,IMAGE_URI
+          envs: ECR_REGISTRY,ECR_REPOSITORY,ECR_NAME,IMAGE_TAG,ECR_TOKEN
           script: |
             # Login to AWS ECR using temporary token from GitHub Actions
             echo ${ECR_TOKEN} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
             
+            IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}/${ECR_NAME}:${IMAGE_TAG}"
             docker pull ${IMAGE_URI}
             if [ "$(docker ps -a --format '{{.Names}}' | grep -c ${{ env.PREV_NAME }})" -gt 0 ]; then 
               docker rm -f ${{ env.PREV_NAME }}
@@ -112,22 +130,77 @@ jobs:
             docker container prune --force
         env:
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+          ECR_NAME: ${{ env.ECR_NAME }}
+          IMAGE_TAG: ${{ env.IMAGE || env.BRANCH || 'latest' }}
           ECR_TOKEN: ${{ steps.ecr-login-token.outputs.token }}
-          IMAGE_URI: ${{ env.IMAGE_URI }}
 
-  notify-teams:
+  notify-teams-dev:
+    if: ${{ github.ref_name == 'dev' }}
     needs: [ build ]
     runs-on: ubuntu-latest
     steps:
-      - name: get tag info
-        uses: Seechange-edu/Parse-Action-Tag@main
-        with:
-          githubToken: ${{ secrets.ACTION_TOKEN }}
-          type: parse
-
       - name: Send Teams Notification
         env:
-          WEBHOOK: ${{ env.TEAMS_WEBHOOK }}
+          WEBHOOK: ${{ vars.DEV_TEAMS_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{
+            "@type": "MessageCard",
+            "@context": "http://schema.org/extensions",
+            "themeColor": "${{ needs.build.result == 'success' && '00FF00' || 'FF0000' }}",
+            "summary": "${{ needs.build.result == 'success' && '🎉 Build succeeded!' || '❌ Build failed!' }}:${{ github.repository }}:${{ github.workflow }}",
+            "title": "${{ needs.build.result == 'success' && '🎉 Build succeeded!' || '❌ Build failed!' }}:${{ github.repository }}:${{ github.workflow }}",
+            "sections": [{
+              "facts": [
+                { "name": "Repository", "value": "${{ github.repository }}" },
+                { "name": "Triggered by", "value": "${{ github.event_name }}" },
+                { "name": "Commit Message", "value": "${{ github.event.head_commit.message }}" },
+                { "name": "Author", "value": "@${{ github.actor }}" },
+                { "name": "Result", "value": "${{ needs.build.result }}" }
+              ],
+              "text": "[View Workflow Run](${{ env.RUN_URL }})"
+            }]
+          }' \
+          "$WEBHOOK"
+  notify-teams-uat:
+    if: ${{ github.ref_name == 'uat' }}
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Teams Notification
+        env:
+          WEBHOOK: ${{ vars.UAT_TEAMS_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{
+            "@type": "MessageCard",
+            "@context": "http://schema.org/extensions",
+            "themeColor": "${{ needs.build.result == 'success' && '00FF00' || 'FF0000' }}",
+            "summary": "${{ needs.build.result == 'success' && '🎉 Build succeeded!' || '❌ Build failed!' }}:${{ github.repository }}:${{ github.workflow }}",
+            "title": "${{ needs.build.result == 'success' && '🎉 Build succeeded!' || '❌ Build failed!' }}:${{ github.repository }}:${{ github.workflow }}",
+            "sections": [{
+              "facts": [
+                { "name": "Repository", "value": "${{ github.repository }}" },
+                { "name": "Triggered by", "value": "${{ github.event_name }}" },
+                { "name": "Commit Message", "value": "${{ github.event.head_commit.message }}" },
+                { "name": "Author", "value": "@${{ github.actor }}" },
+                { "name": "Result", "value": "${{ needs.build.result }}" }
+              ],
+              "text": "[View Workflow Run](${{ env.RUN_URL }})"
+            }]
+          }' \
+          "$WEBHOOK"
+  notify-teams-dev-oxford:
+    if: ${{ github.ref_name == 'dev-oxford' }}
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Teams Notification
+        env:
+          WEBHOOK: ${{ vars.DEV_OXFORD_TEAMS_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           curl -X POST -H "Content-Type: application/json" \
