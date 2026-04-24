@@ -66,7 +66,7 @@ jobs:
             ECR_NAME="dev"
           elif [[ "$ACTIVE_ENV" == uat-* ]]; then
             ECR_NAME="uat"
-          elif [[ "$ACTIVE_ENV" == "prod" ]] || [[ "$ACTIVE_ENV" == "aimcup-prod" ]]; then
+          elif [[ "$ACTIVE_ENV" == "prod" ]] || [[ "$ACTIVE_ENV" == "aimcup-prod" ]] || [[ "$ACTIVE_ENV" == "scmun-school" ]]; then
             ECR_NAME="prod"
           else
             ECR_NAME="$ACTIVE_ENV"
@@ -186,6 +186,34 @@ jobs:
                 { "name": "Repository", "value": "${{ github.repository }}" },
                 { "name": "Triggered by", "value": "${{ github.event_name }}" },
                 { "name": "Commit Message", "value": "${{ github.event.head_commit.message }}" },
+                { "name": "Author", "value": "@${{ github.actor }}" },
+                { "name": "Result", "value": "${{ needs.build.result }}" }
+              ],
+              "text": "[View Workflow Run](${{ env.RUN_URL }})"
+            }]
+          }' \
+            "$WEBHOOK"
+  notify-teams-prod-school:
+    if: contains(github.event.release.tag_name, 'school')
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Teams Notification
+        env:
+          WEBHOOK: ${{ vars.PROD_SCHOOL_TEAMS_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{
+            "@type": "MessageCard",
+            "@context": "http://schema.org/extensions",
+            "themeColor": "${{ needs.build.result == 'success' && '00FF00' || 'FF0000' }}",
+            "summary": "${{ needs.build.result == 'success' && '🎉 School Build succeeded!' || '❌ School Build failed!' }}:${{ github.repository }}:${{ github.event.release.tag_name }}",
+            "title": "${{ needs.build.result == 'success' && '🎉 School Build succeeded!' || '❌ School Build failed!' }}:${{ github.repository }}:${{ github.event.release.tag_name }}",
+            "sections": [{
+              "facts": [
+                { "name": "Repository", "value": "${{ github.repository }}" },
+                { "name": "Tag", "value": "${{ github.event.release.tag_name }}" },
                 { "name": "Author", "value": "@${{ github.actor }}" },
                 { "name": "Result", "value": "${{ needs.build.result }}" }
               ],
