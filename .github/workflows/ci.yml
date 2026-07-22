@@ -22,6 +22,9 @@ jobs:
       active: ${{ steps.deploy-vars.outputs.active }}
       image_tag: ${{ steps.deploy-vars.outputs.image_tag }}
       teams_webhook: ${{ steps.deploy-vars.outputs.teams_webhook }}
+      remote_host: ${{ steps.deploy-vars.outputs.remote_host }}
+      ecr_name: ${{ steps.deploy-vars.outputs.ecr_name }}
+      ecr_registry: ${{ steps.login-pf-aws-ecr.outputs.registry }}
       source_repo: ${{ steps.relinfo.outputs.source_repo }}
       commit_sha: ${{ steps.relinfo.outputs.commit_sha }}
       commit_short: ${{ steps.relinfo.outputs.commit_short }}
@@ -44,6 +47,8 @@ jobs:
             echo "active=${{ env.ACTIVE }}"
             echo "image_tag=${{ env.BRANCH }}"
             echo "teams_webhook=${{ env.TEAMS_WEBHOOK }}"
+            echo "remote_host=${{ env.REMOTE_HOST || vars.REMOTE_HOST }}"
+            echo "ecr_name=${{ env.PUSHREF }}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout code
@@ -173,6 +178,83 @@ jobs:
           ECR_NAME: ${{ env.ECR_NAME }}
           IMAGE_TAG: ${{ env.BRANCH || 'latest' }}
           ECR_TOKEN: ${{ steps.ecr-login-token.outputs.token }}
+
+  # Housekeeping only: never fails the run.
+  # Variant-aware: every prod variant shares the same ECR path (prod:<tag>), so we must prune within
+  # the CURRENT tag's variant only — deleting "old semver under prod" blindly would wipe other apps.
+  prune-images:
+    needs: [action_trigger]
+    if: needs.action_trigger.result == 'success'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune old images for this variant
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          ECR_REGISTRY: ${{ needs.action_trigger.outputs.ecr_registry }}
+          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+          ECR_NAME: ${{ needs.action_trigger.outputs.ecr_name }}
+          IMAGE_TAG: ${{ needs.action_trigger.outputs.image_tag }}
+        with:
+          host: ${{ needs.action_trigger.outputs.remote_host }}
+          username: ${{ vars.REMOTE_USER }}
+          key: ${{ secrets.REMOTE_SSH_KEY }}
+          envs: ECR_REGISTRY,ECR_REPOSITORY,ECR_NAME,IMAGE_TAG
+          script: |
+            IMAGE_PREFIX="${ECR_REGISTRY}/${ECR_REPOSITORY}/${ECR_NAME}"
+            CURRENT="${IMAGE_TAG}"
+
+            # Which variant a tag belongs to — same precedence as Parse-Action-Tag routing.
+            # ipdc-judge MUST come before ipdc ('ipdc-judge' also contains 'ipdc').
+            variant_of() {
+              case "$1" in
+                *aimcup*)     echo aimcup ;;
+                *ipdc-judge*) echo ipdc-judge ;;
+                *ipdc*)       echo ipdc ;;
+                *oxford*)     echo oxford ;;
+                *school*)     echo school ;;
+                *)            echo scmun ;;
+              esac
+            }
+            # The vX.Y.Z inside a tag (empty if none — e.g. a rolling dev-oxford tag).
+            version_of() { echo "$1" | grep -oE '[vV][0-9]+\.[0-9]+\.[0-9]+' | head -1; }
+
+            CUR_VARIANT="$(variant_of "$CURRENT")"
+            if [ -z "$(version_of "$CURRENT")" ]; then
+              echo "Skip prune: '${CURRENT}' has no vX.Y.Z version (rolling tag, nothing accumulates)"
+              exit 0
+            fi
+
+            # Same-variant tags under this ECR path, ordered by version.
+            mapfile -t TAGS < <(
+              docker images --format '{{.Repository}}:{{.Tag}}' \
+                | grep "^${IMAGE_PREFIX}:" \
+                | sed "s|^${IMAGE_PREFIX}:||" \
+                | while IFS= read -r t; do
+                    [ "$(variant_of "$t")" = "$CUR_VARIANT" ] || continue
+                    v="$(version_of "$t")"; [ -n "$v" ] || continue
+                    printf '%s\t%s\n' "$v" "$t"
+                  done \
+                | sort -V | cut -f2
+            )
+
+            # Keep CURRENT + the version right before it; delete older SAME-VARIANT images only.
+            PREV="$(printf '%s\n' "${TAGS[@]}" | awk -v cur="$CURRENT" '
+              { a[++n]=$0 }
+              END { for (i=1;i<=n;i++) if (a[i]==cur && i>1) { print a[i-1]; exit } }')"
+
+            if [ -n "$PREV" ]; then
+              echo "Variant ${CUR_VARIANT}: keep ${CURRENT}, ${PREV}"
+            else
+              echo "Variant ${CUR_VARIANT}: keep ${CURRENT} only (no previous version)"
+            fi
+
+            for tag in "${TAGS[@]}"; do
+              [ "$tag" = "$CURRENT" ] && continue
+              [ -n "$PREV" ] && [ "$tag" = "$PREV" ] && continue
+              echo "Removing ${IMAGE_PREFIX}:${tag}"
+              docker rmi "${IMAGE_PREFIX}:${tag}" 2>/dev/null || true
+            done
 
   # Single notification for every variant (dev / uat / dev-oxford / aimcup-prod / scmun-school / ...).
   # Never fails the run. Targets the Teams "Workflows" webhook passed through the tag body
