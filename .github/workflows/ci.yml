@@ -230,6 +230,7 @@ jobs:
                 *ipdc*)       echo ipdc ;;
                 *oxford*)     echo oxford ;;
                 *school*)     echo school ;;
+                *shanghai-debate*) echo shanghai-debate ;;
                 *)            echo scmun ;;
               esac
             }
