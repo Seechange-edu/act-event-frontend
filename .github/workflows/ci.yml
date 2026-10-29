@@ -231,6 +231,7 @@ jobs:
                 *oxford*)     echo oxford ;;
                 *school*)     echo school ;;
                 *shanghai-debate*) echo shanghai-debate ;;
+                *sunday-sparring*) echo sunday-sparring ;;
                 *)            echo scmun ;;
               esac
             }
