@@ -232,6 +232,7 @@ jobs:
                 *school*)     echo school ;;
                 *shanghai-debate*) echo shanghai-debate ;;
                 *sunday-sparring*) echo sunday-sparring ;;
+                *general-register*) echo general-register ;;
                 *)            echo scmun ;;
               esac
             }
