@@ -1,0 +1,215 @@
+name: Changelog run
+
+# Shared by the single-release and date-range workflows. Checks out the private
+# source repository and repo-toolkit, reads SSM, and writes into that
+# repository's release. This file has no trigger of its own.
+#
+# This repository is public. quiet keeps report text out of logs, job summaries
+# and artifacts. Reports land only on the private release.
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: 'changelog or changelog-summary'
+        required: false
+        type: string
+        default: changelog
+      source_repo:
+        description: 'owner/name of the private source repository'
+        required: true
+        type: string
+      tag:
+        description: 'The deployed release to write notes for'
+        required: false
+        type: string
+        default: ''
+      start_date:
+        description: 'Summary first date, YYYY-MM-DD (UTC+8)'
+        required: false
+        type: string
+        default: ''
+      end_date:
+        description: 'Summary last date, inclusive (UTC+8)'
+        required: false
+        type: string
+        default: ''
+      output_tag:
+        description: 'Summary asset destination; empty means last release in range'
+        required: false
+        type: string
+        default: ''
+      summary_members:
+        description: 'Comma-separated child keys. Default: none.'
+        required: false
+        type: string
+        default: ''
+      summary_variant:
+        description: 'all or one event production line'
+        required: false
+        type: string
+        default: all
+      scope:
+        description: 'single or joint, forcing a rewrite; empty: the release-meta decides'
+        required: false
+        type: string
+        default: ''
+      previous:
+        description: "Where this repository's notes start; empty: where they last reached"
+        required: false
+        type: string
+        default: ''
+      soft_fail:
+        description: 'Carry on when the notes fail, so the caller stays green.'
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      result:
+        description: "repo-toolkit's result JSON"
+        value: ${{ jobs.changelog.outputs.result }}
+
+permissions:
+  contents: read
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ inputs.soft_fail }}
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      result: ${{ steps.notes.outputs.result }}
+    steps:
+      - name: Resolve the release tag
+        env:
+          MODE: ${{ inputs.mode }}
+          RAW_TAG: ${{ inputs.tag }}
+        run: |
+          case "$MODE" in
+            changelog-summary) echo 'RELEASE_TAG=' >> "$GITHUB_ENV"; exit 0 ;;
+            changelog) ;;
+            *) echo '::error::Unsupported changelog mode.'; exit 1 ;;
+          esac
+          [[ "$RAW_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || {
+            echo "::error::'${RAW_TAG}' is not a tag name."
+            exit 1
+          }
+          echo "RELEASE_TAG=$RAW_TAG" >> "$GITHUB_ENV"
+
+      - name: Checkout the source repository with its history
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ env.RELEASE_TAG }}
+          token: ${{ secrets.ACTION_TOKEN }}
+          fetch-depth: ${{ inputs.mode == 'changelog-summary' && '1' || '0' }}
+          persist-credentials: false
+
+      - name: Checkout repo-toolkit
+        uses: actions/checkout@v4
+        with:
+          repository: Seechange-edu/repo-toolkit
+          ref: main
+          token: ${{ secrets.ACTION_TOKEN }}
+          path: .repo-toolkit
+          persist-credentials: false
+
+      - name: Sign in to AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-Changelog
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # OpenAI is the key CMS changelog already reads. Images may use another
+      # region; these parameters live in ap-east-1 with the other products.
+      - name: Read the changelog settings from SSM
+        env:
+          MODE: ${{ inputs.mode }}
+          AWS_REGION: ap-east-1
+          AWS_DEFAULT_REGION: ap-east-1
+        run: |
+          set -euo pipefail
+          param() {
+            local out
+            if out=$(aws ssm get-parameter --name "$1" --with-decryption \
+                --query Parameter.Value --output text 2>&1); then
+              printf '%s' "$out"
+            else
+              echo "::warning::$1 was not read ($(printf '%s' "$out" | grep -oE '\([A-Za-z]+\)' | head -n1 | tr -d '()'))." >&2
+            fi
+          }
+          OPENAI_KEY=$(param /ai-english-gym/dev/OPENAI_API_KEY)
+          if [ -z "$OPENAI_KEY" ] && [ "$MODE" = changelog ]; then
+            echo "::error::Could not read /ai-english-gym/dev/OPENAI_API_KEY from SSM."
+            exit 1
+          fi
+          [ -z "$OPENAI_KEY" ] || echo "::add-mask::$OPENAI_KEY"
+          METER_URL=""
+          METER_KEYS=""
+          METER_APPS=""
+          METER_ENABLED=$(param /api-meter/prod/GLOBAL_ENABLED)
+          if [ "$METER_ENABLED" != false ]; then
+            METER_URL=$(param /api-meter/prod/PROXY_URL_PROD)
+            KEY=$(param /api-meter/prod/INGEST_KEY_EVENT)
+            if [ -n "$KEY" ]; then
+              echo "::add-mask::$KEY"
+              METER_KEYS="event=${KEY},"
+              METER_APPS=" event"
+            fi
+          fi
+          if [ "$METER_ENABLED" = false ]; then
+            echo "api-meter: off (GLOBAL_ENABLED=false), so the changelog calls are not metered."
+          elif [ -z "$METER_URL" ]; then
+            echo "::warning::api-meter: no gateway URL was read, so the changelog calls go straight to OpenAI and are not metered."
+          else
+            echo "api-meter: on, ingest keys for:${METER_APPS:- none}"
+          fi
+          MODEL=$(param /global/prod/CHANGELOG_MODEL_OPENAI)
+          SUMMARY_MODEL=$(param /global/prod/CHANGELOG_SUMMARY_MODEL_OPENAI)
+          if [ "$MODE" = changelog-summary ]; then
+            echo "Changelog summary model from SSM: '${SUMMARY_MODEL:-${MODEL:-<not set: required when there are entries>}}'"
+          else
+            echo "Changelog models from SSM: read='${MODEL:-<not set: gpt-5.4-mini>}' merge='${SUMMARY_MODEL:-<not set: same as read>}'"
+          fi
+          {
+            echo "CHANGELOG_OPENAI_KEY=$OPENAI_KEY"
+            echo "CHANGELOG_MODEL=$MODEL"
+            echo "CHANGELOG_SUMMARY_MODEL=$SUMMARY_MODEL"
+            echo "CHANGELOG_METER_URL=$METER_URL"
+            echo "CHANGELOG_METER_KEYS=$METER_KEYS"
+            echo "CHANGELOG_TOOLKIT_SHA=$(git -C .repo-toolkit rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
+
+      - name: Write the release notes
+        id: notes
+        uses: ./.repo-toolkit
+        with:
+          mode: ${{ inputs.mode }}
+          tag: ${{ env.RELEASE_TAG }}
+          scope: ${{ inputs.scope }}
+          previous: ${{ inputs.previous }}
+          startDate: ${{ inputs.start_date }}
+          endDate: ${{ inputs.end_date }}
+          outputTag: ${{ inputs.output_tag }}
+          summaryMembers: ${{ inputs.summary_members }}
+          summaryVariant: ${{ inputs.summary_variant }}
+          openaiKey: ${{ env.CHANGELOG_OPENAI_KEY }}
+          model: ${{ env.CHANGELOG_MODEL }}
+          summaryModel: ${{ env.CHANGELOG_SUMMARY_MODEL }}
+          meterBaseUrl: ${{ env.CHANGELOG_METER_URL }}
+          meterKeys: ${{ env.CHANGELOG_METER_KEYS }}
+          quiet: 'true'
+          dryRun: 'false'
+          token: ${{ secrets.ACTION_TOKEN }}
+
+      - name: Write the run summary
+        env:
+          RESULT: ${{ steps.notes.outputs.result }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$RESULT" \
+            | jq -r '.branches[0] | "User changelog: [\(.tag)](\(.url)) — \(.reason)"' \
+            >> "$GITHUB_STEP_SUMMARY"
