@@ -276,6 +276,22 @@ jobs:
               docker rmi "${IMAGE_PREFIX}:${tag}" 2>/dev/null || true
             done
 
+  # User-facing notes after a successful production deploy. Dev and UAT stay
+  # on PUSHREF dev/uat. release-meta decides single, joint, or nothing.
+  # A failure here does not fail the deploy.
+  changelog:
+    needs: [action_trigger]
+    if: needs.action_trigger.result == 'success' && needs.action_trigger.outputs.ecr_name == 'prod'
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/changelog-run.yml
+    with:
+      source_repo: ${{ needs.action_trigger.outputs.source_repo }}
+      tag: ${{ needs.action_trigger.outputs.image_tag }}
+      soft_fail: true
+    secrets: inherit
+
   # Single notification for every variant (dev / uat / dev-oxford / aimcup-prod / scmun-school / ...).
   # Never fails the run. Targets the Teams "Workflows" webhook passed through the tag body
   # (env.TEAMS_WEBHOOK) — the Environment fact shows which variant this deploy was.
