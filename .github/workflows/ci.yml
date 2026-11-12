@@ -130,7 +130,7 @@ jobs:
       - name: Build and push Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+          ECR_REPOSITORY: ${{ vars.AWS_ECR_REPOSITORY }}
           # 镜像 tag 用 BRANCH（发版 tag，如 aimcup-v1.0.0），版本号可见
           IMAGE_TAG: ${{ env.BRANCH || 'latest' }}
         run: |
@@ -176,7 +176,7 @@ jobs:
             # docker container prune --force
         env:
           ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+          ECR_REPOSITORY: ${{ vars.AWS_ECR_REPOSITORY }}
           ECR_NAME: ${{ env.ECR_NAME }}
           IMAGE_TAG: ${{ env.BRANCH || 'latest' }}
           ECR_TOKEN: ${{ steps.ecr-login-token.outputs.token }}
@@ -209,7 +209,7 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         env:
           ECR_REGISTRY: ${{ needs.action_trigger.outputs.ecr_registry }}
-          ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+          ECR_REPOSITORY: ${{ vars.AWS_ECR_REPOSITORY }}
           ECR_NAME: ${{ needs.action_trigger.outputs.ecr_name }}
           IMAGE_TAG: ${{ needs.action_trigger.outputs.image_tag }}
         with:
