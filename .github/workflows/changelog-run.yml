@@ -123,13 +123,11 @@ jobs:
           role-session-name: GitHubActions-Changelog
           aws-region: ${{ vars.AWS_REGION }}
 
-      # OpenAI is the key CMS changelog already reads. Images may use another
-      # region; these parameters live in ap-east-1 with the other products.
+      # OpenAI is the key CMS changelog already reads. Region is vars.AWS_REGION,
+      # the same value this repository's deploy uses when it assumes the role.
       - name: Read the changelog settings from SSM
         env:
           MODE: ${{ inputs.mode }}
-          AWS_REGION: ap-east-1
-          AWS_DEFAULT_REGION: ap-east-1
         run: |
           set -euo pipefail
           param() {
