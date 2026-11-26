@@ -246,10 +246,13 @@ jobs:
             fi
 
             # Same-variant tags under this ECR path, ordered by version.
+            if ! LOCAL_IMAGES=$(docker images --format '{{.Repository}} {{.Tag}}'); then
+              echo "Skip version prune: could not list local Docker images" >&2
+              exit 0
+            fi
+
             mapfile -t TAGS < <(
-              docker images --format '{{.Repository}}:{{.Tag}}' \
-                | grep "^${IMAGE_PREFIX}:" \
-                | sed "s|^${IMAGE_PREFIX}:||" \
+              awk -v repo="$IMAGE_PREFIX" '$1 == repo { print $2 }' <<< "$LOCAL_IMAGES" \
                 | while IFS= read -r t; do
                     [ "$(variant_of "$t")" = "$CUR_VARIANT" ] || continue
                     v="$(version_of "$t")"; [ -n "$v" ] || continue
@@ -257,6 +260,11 @@ jobs:
                   done \
                 | sort -V | cut -f2
             )
+
+            if ! grep -Fxq -- "$CURRENT" <<< "$(printf '%s\n' "${TAGS[@]}")"; then
+              echo "Skip version prune: ${IMAGE_PREFIX}:${CURRENT} is not in the local version list"
+              exit 0
+            fi
 
             # Keep CURRENT + the version right before it; delete older SAME-VARIANT images only.
             PREV="$(printf '%s\n' "${TAGS[@]}" | awk -v cur="$CURRENT" '
